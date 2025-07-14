@@ -1,0 +1,179 @@
+//@version=6
+
+strategy(title = "SOL/USDT Señales Certeras v6.6 – Tendencia + Pull-Back Short",
+         overlay = true,
+         max_bars_back = 5000,
+         default_qty_type = strategy.percent_of_equity,
+         default_qty_value = 10)
+
+//════════════ 1. INPUTS ════════════
+groupTend   = "Tendencia"
+emaPeriod   = input.int(100, "Periodo EMA", group = groupTend)
+emaMargin   = input.float(0.001, "Margen EMA (%)", step = 0.0005, group = groupTend)
+
+groupMom    = "Momentum"
+rsiPeriod   = input.int(14, "Periodo RSI", group = groupMom)
+adxPeriod   = input.int(14, "Periodo ADX", group = groupMom)
+
+groupVol    = "Volumen"
+volRatio    = input.float(1.4, "Volumen inusual ×", step = 0.1, group = groupVol)
+
+groupProt   = "Protección"
+blockBars      = input.int(8, "Bloqueo tras SL (barras)", group = groupProt)
+blockRangeBars = input.int(6, "Bloqueo tras SL en rango", group = groupProt)
+
+groupBTC    = "BTC"
+useBTCFilter = input.bool(true, "Confirmar con BTC", group = groupBTC)
+btcEmaPeriod = input.int(100, "EMA BTC", group = groupBTC)
+
+groupRng    = "Rango lateral"
+rangoPercent = input.float(0.015, "Rango ≤ % precio", step = 0.001, group = groupRng)
+
+groupRisk   = "TP/SL"
+slMult      = input.float(1.0, "SL = ATR ×", step = 0.1, group = groupRisk)
+tpMult      = input.float(2.0, "TP base = ATR ×", step = 0.1, group = groupRisk)
+
+groupSplit  = "Salida parcial"
+useSplitTP   = input.bool(true, "Usar TP dividido 50 %/50 %", group = groupSplit)
+tp1PctOfBase = input.float(0.6, "TP1 = % de TP base", step = 0.05, group = groupSplit)
+
+groupTrail  = "Trailing"
+useTrailing = input.bool(true, "Activar trailing", group = groupTrail)
+trailMult   = input.float(1.5, "Trail = ATR ×", step = 0.1, group = groupTrail)
+
+groupPB     = "Avanzado – Pull-Back Short"
+enablePB    = input.bool(true, "Habilitar Pull-Back Short", group = groupPB)
+pbAtrMult   = input.float(1.2, "Cuerpo rojo mín. ATR ×", step = 0.1, group = groupPB)
+pbVolMult   = input.float(1.1, "Volumen ≥ ×", step = 0.05, group = groupPB)
+pbRsiMax    = input.float(50,  "RSI ≤", step = 1, group = groupPB)
+
+//════════════ 2. CÁLCULOS BÁSICOS ════════════
+ema = ta.ema(close, emaPeriod)
+atr = ta.atr(14)
+rsi = ta.rsi(close, rsiPeriod)
+
+//–– ADX manual
+upMove   = high - high[1]
+downMove = low[1] - low
+plusDM   = (upMove  > downMove and upMove  > 0) ? upMove  : 0
+minusDM  = (downMove > upMove  and downMove > 0) ? downMove : 0
+tr       = ta.tr(true)
+smPlusDM  = ta.rma(plusDM,  adxPeriod)
+smMinusDM = ta.rma(minusDM, adxPeriod)
+smTR      = ta.rma(tr,      adxPeriod)
+plusDI = 100 * smPlusDM  / smTR
+minusDI = 100 * smMinusDM / smTR
+dx    = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx   = ta.rma(dx, adxPeriod)
+adxOk = adx > 20
+
+//–– BTC trend filter
+btcClose = request.security("BINANCE:BTCUSDT", timeframe.period, close)
+btcEma   = request.security("BINANCE:BTCUSDT", timeframe.period, ta.ema(close, btcEmaPeriod))
+btcUp    = btcClose > btcEma
+btcDown  = btcClose < btcEma
+
+//–– Volumen y rango
+vol        = volume
+avgVol     = ta.sma(vol, 20)
+volSpike   = vol > avgVol * volRatio
+maxRange   = ta.highest(high, 10)
+minRange   = ta.lowest(low, 10)
+rangoLat   = (maxRange - minRange) < (close * rangoPercent)
+
+//–– Cuerpo de vela
+body        = math.abs(close - open)
+rangeCandle = high - low
+candleBig   = body > (rangeCandle * 0.6)
+bull        = close > open
+bear        = close < open
+
+//–– Variables de bloqueo
+var int lastSLBar      = na
+var int lastSLBarRange = na
+
+//════════════ 3. FUNCIONES AUXILIARES (NO modifican var) ════════════
+manageLong(slL, tpL) =>
+    tp1 = close + tpMult * atr * tp1PctOfBase
+    if useSplitTP
+        if useTrailing
+            strategy.exit("TP1 L", from_entry = "LONG", limit = tp1, qty_percent = 50, stop = slL)
+            strategy.exit("Trail L", from_entry = "LONG", qty_percent = 50,
+                          trail_points = trailMult * atr, trail_offset = trailMult * atr, stop = slL)
+        else
+            strategy.exit("TP1 L", from_entry = "LONG", limit = tp1, qty_percent = 50, stop = slL)
+            strategy.exit("TP2 L", from_entry = "LONG", limit = tpL,  qty_percent = 50, stop = slL)
+    else
+        if useTrailing
+            strategy.exit("Trail L", from_entry = "LONG",
+                          trail_points = trailMult * atr, trail_offset = trailMult * atr, stop = slL)
+        else
+            strategy.exit("TP L", from_entry = "LONG", limit = tpL, stop = slL)
+
+manageShort(slS, tpS) =>
+    tp1 = close - tpMult * atr * tp1PctOfBase
+    if useSplitTP
+        if useTrailing
+            strategy.exit("TP1 S", from_entry = "SHORT", limit = tp1, qty_percent = 50, stop = slS)
+            strategy.exit("Trail S", from_entry = "SHORT", qty_percent = 50,
+                          trail_points = trailMult * atr, trail_offset = trailMult * atr, stop = slS)
+        else
+            strategy.exit("TP1 S", from_entry = "SHORT", limit = tp1, qty_percent = 50, stop = slS)
+            strategy.exit("TP2 S", from_entry = "SHORT", limit = tpS, qty_percent = 50, stop = slS)
+    else
+        if useTrailing
+            strategy.exit("Trail S", from_entry = "SHORT",
+                          trail_points = trailMult * atr, trail_offset = trailMult * atr, stop = slS)
+        else
+            strategy.exit("TP S", from_entry = "SHORT", limit = tpS, stop = slS)
+
+//════════════ 4. CONDICIONES Y ENTRADAS ════════════
+upTrend   = close > ema * (1 + emaMargin)
+downTrend = close < ema * (1 - emaMargin)
+rsiLong   = rsi > 58
+rsiShort  = rsi < 42
+
+blocked      = not na(lastSLBar)      and (bar_index - lastSLBar      < blockBars)
+blockedRange = not na(lastSLBarRange) and (bar_index - lastSLBarRange < blockRangeBars)
+noTrade      = blocked or blockedRange
+
+longCond  = upTrend   and volSpike and rsiLong  and adxOk and candleBig and bull  and not rangoLat and not noTrade and (not useBTCFilter or btcUp)
+shortCond = downTrend and volSpike and rsiShort and adxOk and candleBig and bear  and not rangoLat and not noTrade and (not useBTCFilter or btcDown)
+
+if longCond
+    strategy.entry("LONG",  strategy.long)
+if shortCond
+    strategy.entry("SHORT", strategy.short)
+
+//–– Pull-Back SHORT opcional
+pullBackShortCond = enablePB and upTrend and bear and body > pbAtrMult * atr and vol > avgVol * pbVolMult and rsi < pbRsiMax and adxOk and not rangoLat and not noTrade and (not useBTCFilter or btcUp)
+if pullBackShortCond
+    strategy.entry("PB-SHORT", strategy.short)
+
+//════════════ 5. TP / SL & GESTIÓN (actualiza bloqueos FUERA de funciones) ════════════
+slLong  = close - slMult * atr
+tpBaseL = close + tpMult * atr
+slShort = close + slMult * atr
+tpBaseS = close - tpMult * atr
+
+if strategy.position_size > 0
+    manageLong(slLong, tpBaseL)
+    //–– actualizar bloqueos si toca SL
+    if close <= slLong
+        lastSLBar := bar_index
+        if rangoLat
+            lastSLBarRange := bar_index
+
+if strategy.position_size < 0
+    manageShort(slShort, tpBaseS)
+    //–– actualizar bloqueos si toca SL
+    if close >= slShort
+        lastSLBar := bar_index
+        if rangoLat
+            lastSLBarRange := bar_index
+
+//════════════ 6. VISUAL ════════════
+plot(ema, title = "EMA", color = color.orange)
+plotshape(longCond,          location = location.belowbar, style = shape.triangleup,   color = color.lime, text = "LONG")
+plotshape(shortCond,         location = location.abovebar, style = shape.triangledown, color = color.red,  text = "SHORT")
+plotshape(pullBackShortCond, location = location.abovebar, style = shape.square,       color = color.fuchsia, text = "PB")
